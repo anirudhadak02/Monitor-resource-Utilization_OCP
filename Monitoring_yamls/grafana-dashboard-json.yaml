@@ -1,0 +1,89 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-json
+  namespace: openshift-user-workload-monitoring
+data:
+  dashboard.json: |
+    {
+      "dashboard": {
+        "title": "Cluster Resource Utilization",
+        "uid": "cluster-util",
+        "schemaVersion": 27,
+        "version": 1,
+        "panels": [
+          {
+            "type": "graph",
+            "title": "Node Memory Usage %",
+            "targets": [
+              {
+                "expr": "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100",
+                "legendFormat": "{{instance}}"
+              }
+            ]
+          },
+          {
+            "type": "graph",
+            "title": "Pod CPU Usage (cores)",
+            "targets": [
+              {
+                "expr": "sum(rate(container_cpu_usage_seconds_total{container!=\"\"}[5m])) by (pod, namespace)",
+                "legendFormat": "{{namespace}}/{{pod}}"
+              }
+            ]
+          },
+          {
+            "type": "graph",
+            "title": "PVC Usage %",
+            "targets": [
+              {
+                "expr": "(kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes) * 100",
+                "legendFormat": "{{persistentvolumeclaim}}"
+              }
+            ]
+          }
+        ]
+      },
+      "overwrite": true
+    }
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: push-grafana-dashboard
+  namespace: openshift-user-workload-monitoring
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: uploader
+        image: curlimages/curl:8.5.0
+        env:
+        - name: GF_USER
+          valueFrom:
+            secretKeyRef:
+              name: grafana-credentials
+              key: GF_SECURITY_ADMIN_USER
+        - name: GF_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: grafana-credentials
+              key: GF_SECURITY_ADMIN_PASSWORD
+        command:
+          - "sh"
+          - "-c"
+          - |
+            curl -k -X POST \
+              -H "Content-Type: application/json" \
+              -u ${GF_USER}:${GF_PASSWORD} \
+              http://grafana-service:3000/api/dashboards/db \
+              -d @/config/dashboard.json
+        volumeMounts:
+        - name: dashboard
+          mountPath: /config
+      volumes:
+      - name: dashboard
+        configMap:
+          name: grafana-dashboard-json
+
