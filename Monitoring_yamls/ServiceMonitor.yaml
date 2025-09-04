@@ -1,0 +1,17 @@
+kind: ServiceMonitor
+metadata:
+  name: test-servicemonitor
+  namespace: openshift-user-workload-monitoring
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kube-state-metrics
+  namespaceSelector:
+    matchNames:
+      - openshift-monitoring
+  endpoints:
+  - port: https-main   # port exposed by kube-state-metrics
+    interval: 30s
+    scheme: https
+    tlsConfig:
+      insecureSkipVerify: true
