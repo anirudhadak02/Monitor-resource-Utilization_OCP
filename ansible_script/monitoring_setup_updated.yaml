@@ -1,0 +1,161 @@
+---
+- name: Configure OpenShift Monitoring Stack
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    namespace: "openshift-user-workload-monitoring"
+
+  tasks:
+
+    - name: Deploy ServiceMonitor for kube-state-metrics
+      kubernetes.core.k8s:
+        state: present
+        definition: |
+          apiVersion: monitoring.coreos.com/v1
+          kind: ServiceMonitor
+          metadata:
+            name: test-servicemonitor
+            namespace: {{ namespace }}
+          spec:
+            selector:
+              matchLabels:
+                app.kubernetes.io/name: kube-state-metrics
+            namespaceSelector:
+              matchNames:
+                - openshift-monitoring
+            endpoints:
+              - port: https-main
+                interval: 30s
+                scheme: https
+                tlsConfig:
+                  insecureSkipVerify: true
+
+    - name: Deploy PrometheusRule for resource utilization
+      kubernetes.core.k8s:
+        state: present
+        definition: |
+          apiVersion: monitoring.coreos.com/v1
+          kind: PrometheusRule
+          metadata:
+            name: test-resource-alerts
+            namespace: {{ namespace }}
+          spec:
+            groups:
+              - name: resource.rules
+                rules:
+                  - alert: HighNodeMemoryUsage
+                    expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+                    for: 2m
+                    labels:
+                      severity: warning
+                    annotations:
+                      summary: "Node memory usage > 85%"
+                      description: "{% raw %}Node {{ $labels.instance }} memory is filling up ({{ $value }}%).{% endraw %}"
+
+                  - alert: PersistentVolumeFillingUp
+                    expr: (kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes) * 100 > 90
+                    for: 5m
+                    labels:
+                      severity: warning
+                    annotations:
+                      summary: "PVC usage > 90%"
+                      description: "{% raw %}PVC {{ $labels.persistentvolumeclaim }} is almost full.{% endraw %}"
+
+    - name: Deploy Grafana Dashboard ConfigMap
+      kubernetes.core.k8s:
+        state: present
+        definition: |
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: grafana-dashboard-json
+            namespace: {{ namespace }}
+          data:
+            dashboard.json: |
+              {
+                "dashboard": {
+                  "title": "Cluster Resource Utilization",
+                  "uid": "cluster-util",
+                  "schemaVersion": 27,
+                  "version": 1,
+                  "panels": [
+                    {
+                      "type": "graph",
+                      "title": "Node Memory Usage %",
+                      "targets": [
+                        {
+                          "expr": "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100",
+                          "legendFormat": "{{ '{{instance}}' }}"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "graph",
+                      "title": "Pod CPU Usage (cores)",
+                      "targets": [
+                        {
+                          "expr": "sum(rate(container_cpu_usage_seconds_total{container!=\"\"}[5m])) by (pod, namespace)",
+                          "legendFormat": "{{ '{{namespace}}/{{pod}}' }}"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "graph",
+                      "title": "PVC Usage %",
+                      "targets": [
+                        {
+                          "expr": "(kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes) * 100",
+                          "legendFormat": "{{ '{{persistentvolumeclaim}}' }}"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "overwrite": true
+              }
+
+    - name: Deploy Grafana Dashboard Uploader Job
+      kubernetes.core.k8s:
+        state: present
+        definition: |
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: push-grafana-dashboard
+            namespace: {{ namespace }}
+          spec:
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: uploader
+                    image: curlimages/curl:8.5.0
+                    env:
+                      - name: GF_USER
+                        valueFrom:
+                          secretKeyRef:
+                            name: grafana-credentials
+                            key: GF_SECURITY_ADMIN_USER
+                      - name: GF_PASSWORD
+                        valueFrom:
+                          secretKeyRef:
+                            name: grafana-credentials
+                            key: GF_SECURITY_ADMIN_PASSWORD
+                    command:
+                      - "sh"
+                      - "-c"
+                      - |
+                        curl -k -X POST \
+                          -H "Content-Type: application/json" \
+                          -u ${GF_USER}:${GF_PASSWORD} \
+                          http://grafana-service:3000/api/dashboards/db \
+                          -d @/config/dashboard.json
+                    volumeMounts:
+                      - name: dashboard
+                        mountPath: /config
+                volumes:
+                  - name: dashboard
+                    configMap:
+                      name: grafana-dashboard-json
+
