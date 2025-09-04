@@ -1,0 +1,26 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: test-resource-alerts
+  namespace: openshift-user-workload-monitoring
+spec:
+  groups:
+  - name: resource.rules
+    rules:
+    - alert: HighNodeMemoryUsage
+      expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+      for: 2m
+      labels:
+        severity: warning
+      annotations:
+        summary: "Node memory usage > 85%"
+        description: "Node {{ $labels.instance }} memory is filling up ({{ $value }}%)."
+
+    - alert: PersistentVolumeFillingUp
+      expr: (kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes) * 100 > 90
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "PVC usage > 90%"
+        description: "PVC {{ $labels.persistentvolumeclaim }} is almost full."
