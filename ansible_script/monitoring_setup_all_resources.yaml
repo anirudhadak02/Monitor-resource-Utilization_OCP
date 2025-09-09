@@ -1,0 +1,370 @@
+---
+- name: Configure OpenShift Monitoring Stack (Infra + Workloads)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    namespace: "openshift-user-workload-monitoring"
+
+  tasks:
+
+    ####################################################################
+    # ServiceMonitors
+    ####################################################################
+    - name: Deploy ServiceMonitor for kube-state-metrics
+      kubernetes.core.k8s:
+        state: present
+        definition: |
+          apiVersion: monitoring.coreos.com/v1
+          kind: ServiceMonitor
+          metadata:
+            name: kube-state-metrics-sm
+            namespace: {{ namespace }}
+          spec:
+            selector:
+              matchLabels:
+                app.kubernetes.io/name: kube-state-metrics
+            namespaceSelector:
+              matchNames:
+                - openshift-monitoring
+            endpoints:
+              - port: https-main
+                interval: 30s
+                scheme: https
+                tlsConfig:
+                  insecureSkipVerify: true
+
+    - name: Deploy ServiceMonitor for node-exporter
+      kubernetes.core.k8s:
+        state: present
+        definition: |
+          apiVersion: monitoring.coreos.com/v1
+          kind: ServiceMonitor
+          metadata:
+            name: node-exporter-sm
+            namespace: {{ namespace }}
+          spec:
+            selector:
+              matchLabels:
+                app.kubernetes.io/name: node-exporter
+            namespaceSelector:
+              matchNames:
+                - openshift-monitoring
+            endpoints:
+              - port: https
+                interval: 30s
+                scheme: https
+                tlsConfig:
+                  insecureSkipVerify: true
+
+    - name: Deploy ServiceMonitor for kubelet
+      kubernetes.core.k8s:
+        state: present
+        definition: |
+          apiVersion: monitoring.coreos.com/v1
+          kind: ServiceMonitor
+          metadata:
+            name: kubelet-sm
+            namespace: {{ namespace }}
+          spec:
+            selector:
+              matchLabels:
+                k8s-app: kubelet
+            namespaceSelector:
+              matchNames:
+                - kube-system
+            endpoints:
+              - port: https-metrics
+                interval: 30s
+                scheme: https
+                tlsConfig:
+                  insecureSkipVerify: true
+
+    - name: Deploy ServiceMonitor for API server
+      kubernetes.core.k8s:
+        state: present
+        definition: |
+          apiVersion: monitoring.coreos.com/v1
+          kind: ServiceMonitor
+          metadata:
+            name: apiserver-sm
+            namespace: {{ namespace }}
+          spec:
+            selector:
+              matchLabels:
+                apiserver: "true"
+            namespaceSelector:
+              matchNames:
+                - openshift-kube-apiserver
+            endpoints:
+              - port: https
+                interval: 30s
+                scheme: https
+                tlsConfig:
+                  insecureSkipVerify: true
+
+    - name: Deploy ServiceMonitor for etcd
+      kubernetes.core.k8s:
+        state: present
+        definition: |
+          apiVersion: monitoring.coreos.com/v1
+          kind: ServiceMonitor
+          metadata:
+            name: etcd-sm
+            namespace: {{ namespace }}
+          spec:
+            selector:
+              matchLabels:
+                k8s-app: etcd
+            namespaceSelector:
+              matchNames:
+                - openshift-etcd
+            endpoints:
+              - port: etcd-metrics
+                interval: 30s
+                scheme: https
+                tlsConfig:
+                  insecureSkipVerify: true
+
+    - name: Deploy ServiceMonitor for CoreDNS
+      kubernetes.core.k8s:
+        state: present
+        definition: |
+          apiVersion: monitoring.coreos.com/v1
+          kind: ServiceMonitor
+          metadata:
+            name: coredns-sm
+            namespace: {{ namespace }}
+          spec:
+            selector:
+              matchLabels:
+                k8s-app: kube-dns
+            namespaceSelector:
+              matchNames:
+                - openshift-dns
+            endpoints:
+              - port: metrics
+                interval: 30s
+
+    ####################################################################
+    # PrometheusRules
+    ####################################################################
+    - name: Deploy PrometheusRule for cluster alerts
+      kubernetes.core.k8s:
+        state: present
+        definition: |
+          apiVersion: monitoring.coreos.com/v1
+          kind: PrometheusRule
+          metadata:
+            name: cluster-resource-alerts
+            namespace: {{ namespace }}
+          spec:
+            groups:
+              - name: node.rules
+                rules:
+                  - alert: HighNodeMemoryUsage
+                    expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+                    for: 5m
+                    labels:
+                      severity: warning
+                    annotations:
+                      summary: "Node memory usage > 85%"
+                      description: "Node $labels.instance memory is high ($value%)"
+
+                  - alert: HighNodeCPUUsage
+                    expr: 100 - (avg by(instance)(irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 90
+                    for: 5m
+                    labels:
+                      severity: critical
+                    annotations:
+                      summary: "Node CPU usage > 90%"
+                      description: "Node $labels.instance CPU usage is $value%"
+
+                  - alert: DiskUsageHigh
+                    expr: (node_filesystem_size_bytes{fstype!="tmpfs"} - node_filesystem_free_bytes{fstype!="tmpfs"}) / node_filesystem_size_bytes{fstype!="tmpfs"} * 100 > 90
+                    for: 10m
+                    labels:
+                      severity: warning
+                    annotations:
+                      summary: "Disk usage > 90%"
+                      description: "Instance $labels.instance disk is almost full."
+
+                  - alert: PersistentVolumeFillingUp
+                    expr: (kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes) * 100 > 90
+                    for: 5m
+                    labels:
+                      severity: warning
+                    annotations:
+                      summary: "PVC usage > 90%"
+                      description: "PVC $labels.persistentvolumeclaim in namespace $labels.namespace is almost full."
+
+              - name: pod.rules
+                rules:
+                  - alert: PodCrashLooping
+                    expr: increase(kube_pod_container_status_restarts_total[5m]) > 3
+                    for: 10m
+                    labels:
+                      severity: warning
+                    annotations:
+                      summary: "Pod $labels.pod is restarting frequently"
+                      description: "Pod in namespace $labels.namespace restarted $value times in 5m."
+
+                  - alert: PodOOMKilled
+                    expr: kube_pod_container_status_last_terminated_reason{reason="OOMKilled"} > 0
+                    for: 2m
+                    labels:
+                      severity: critical
+                    annotations:
+                      summary: "Pod OOMKilled"
+                      description: "Pod $labels.pod in namespace $labels.namespace was killed due to OOM."
+
+              - name: controlplane.rules
+                rules:
+                  - alert: APIServerHighLatency
+                    expr: histogram_quantile(0.99, sum(rate(apiserver_request_duration_seconds_bucket[5m])) by (le)) > 1
+                    for: 5m
+                    labels:
+                      severity: warning
+                    annotations:
+                      summary: "API Server latency > 1s"
+                      description: "API Server latency is $value s"
+
+                  - alert: EtcdHighCommitLatency
+                    expr: histogram_quantile(0.99, rate(etcd_disk_wal_fsync_duration_seconds_bucket[5m])) > 0.05
+                    for: 5m
+                    labels:
+                      severity: warning
+                    annotations:
+                      summary: "etcd commit latency high"
+                      description: "etcd commit latency $value s"
+
+                  - alert: EtcdTooManyLeaderChanges
+                    expr: increase(etcd_server_leader_changes_seen_total[1h]) > 3
+                    for: 0m
+                    labels:
+                      severity: critical
+                    annotations:
+                      summary: "etcd leader changes"
+                      description: "etcd leader changed too frequently."
+
+    ####################################################################
+    # Grafana Dashboard
+    ####################################################################
+
+    - name: Deploy Grafana Dashboard ConfigMap
+      kubernetes.core.k8s:
+        state: present
+        definition: |
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: grafana-dashboard-json
+            namespace: {{ namespace }}
+          data:
+            dashboard.json: |
+              {
+                "dashboard": {
+                  "title": "Cluster Resource Monitoring",
+                  "uid": "cluster-util",
+                  "schemaVersion": 27,
+                  "version": 1,
+                  "panels": [
+                    {
+                      "type": "graph",
+                      "title": "Node Memory Usage %",
+                      "targets": [
+                        { "expr": "(1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100", "legendFormat": "{{'{{'}}instance{{'}}'}}" }
+                      ]
+                    },
+                    {
+                      "type": "graph",
+                      "title": "Node CPU Usage %",
+                      "targets": [
+                        { "expr": "100 - (avg by(instance)(irate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)", "legendFormat": "{{'{{'}}instance{{'}}'}}" }
+                      ]
+                    },
+                    {
+                      "type": "graph",
+                      "title": "Disk Usage %",
+                      "targets": [
+                        { "expr": "(node_filesystem_size_bytes - node_filesystem_free_bytes) / node_filesystem_size_bytes * 100", "legendFormat": "{{'{{'}}instance{{'}}'}}" }
+                      ]
+                    },
+                    {
+                      "type": "graph",
+                      "title": "Pod Restarts",
+                      "targets": [
+                        { "expr": "increase(kube_pod_container_status_restarts_total[5m])", "legendFormat": "{{'{{'}}namespace{{'}}'}}/{{'{{'}}pod{{'}}'}}" }
+                      ]
+                    },
+                    {
+                      "type": "graph",
+                      "title": "PVC Usage %",
+                      "targets": [
+                        { "expr": "(kubelet_volume_stats_used_bytes / kubelet_volume_stats_capacity_bytes) * 100", "legendFormat": "{{'{{'}}persistentvolumeclaim{{'}}'}}" }
+                      ]
+                    },
+                    {
+                      "type": "graph",
+                      "title": "API Server Latency (p99)",
+                      "targets": [
+                        { "expr": "histogram_quantile(0.99, sum(rate(apiserver_request_duration_seconds_bucket[5m])) by (le))", "legendFormat": "apiserver" }
+                      ]
+                    },
+                    {
+                      "type": "graph",
+                      "title": "etcd Leader Changes",
+                      "targets": [
+                        { "expr": "increase(etcd_server_leader_changes_seen_total[1h])", "legendFormat": "etcd leader changes" }
+                      ]
+                    }
+                  ]
+                },
+                "overwrite": true
+              }
+
+
+    - name: Deploy Grafana Dashboard Uploader Job
+      kubernetes.core.k8s:
+        state: present
+        definition: |
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: push-grafana-dashboard
+            namespace: {{ namespace }}
+          spec:
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                  - name: uploader
+                    image: curlimages/curl:8.5.0
+                    env:
+                      - name: GF_USER
+                        valueFrom:
+                          secretKeyRef:
+                            name: grafana-credentials
+                            key: GF_SECURITY_ADMIN_USER
+                      - name: GF_PASSWORD
+                        valueFrom:
+                          secretKeyRef:
+                            name: grafana-credentials
+                            key: GF_SECURITY_ADMIN_PASSWORD
+                    command:
+                      - "sh"
+                      - "-c"
+                      - |
+                        curl -k -X POST \
+                          -H "Content-Type: application/json" \
+                          -u ${GF_USER}:${GF_PASSWORD} \
+                          http://grafana-service:3000/api/dashboards/db \
+                          -d @/config/dashboard.json
+                    volumeMounts:
+                      - name: dashboard
+                        mountPath: /config
+                volumes:
+                  - name: dashboard
+                    configMap:
+                      name: grafana-dashboard-json
+
